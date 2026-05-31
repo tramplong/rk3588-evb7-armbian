@@ -24,6 +24,15 @@ on:
         - cinnamon
         - gnome
         - xfce
+      desktop_tier:
+        description: 'Desktop App Groups (minimal/mid/full)'
+        required: true
+        default: 'APPGROUPS_MID'
+        type: choice
+        options:
+        - APPGROUPS_MINIMAL
+        - APPGROUPS_MID
+        - APPGROUPS_FULL
       build_desktop:
         description: 'Build with Desktop Environment?'
         required: true
@@ -85,6 +94,7 @@ jobs:
           RELEASE=${{ inputs.ubuntu_release || 'noble' }} \
           BUILD_DESKTOP=${{ inputs.build_desktop || 'yes' }} \
           BUILD_MINIMAL=no \
+          DESKTOP_APPGROUPS_SELECTED=${{ inputs.desktop_tier || 'APPGROUPS_MID' }} \
           DESKTOP_ENVIRONMENT=${{ inputs.desktop_env || 'cinnamon' }} \
           KERNEL_BTF=no \
           KERNEL_CONFIGURE=no \
