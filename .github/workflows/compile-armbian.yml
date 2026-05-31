@@ -45,6 +45,9 @@ on:
 env:
   TZ: Asia/Shanghai
 
+permissions:
+  contents: write
+
 jobs:
   compile:
     runs-on: ubuntu-22.04
@@ -102,21 +105,65 @@ jobs:
           CONFIG_CHANGED=no
       timeout-minutes: 360
     
-    - name: Upload compiled image
+    - name: Compress image
+      run: |
+        cd armbian-build/output/images/
+        IMG=$(ls *.img 2>/dev/null | head -1)
+        if [ -n "$IMG" ]; then
+          echo "Compressing: $IMG"
+          xz -T0 -v "$IMG"
+          echo "IMG_XZ=$IMG.xz" >> $GITHUB_ENV
+          sha256sum "$IMG.xz" > "$IMG.xz.sha256"
+        fi
+
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: armbian-rk3588-evb7-${{ github.run_id }}
-        path: armbian-build/output/images/*.img
+        path: |
+          armbian-build/output/images/*.img.xz
+          armbian-build/output/images/*.img.xz.sha256
         retention-days: 30
-        
-    - name: Generate download link
+
+    - name: Create Release
+      if: github.event_name != 'pull_request'
+      uses: softprops/action-gh-release@v2
+      with:
+        name: "Armbian RK3588 EVB7 — ${{ inputs.ubuntu_release || 'noble' }} ${{ inputs.desktop_env || 'cinnamon' }}"
+        tag_name: v${{ github.run_number }}
+        files: |
+          armbian-build/output/images/*.img.xz
+          armbian-build/output/images/*.img.xz.sha256
+        body: |
+          ## Armbian for RK3588 EVB7 LP4 V10
+
+          | Item | Value |
+          |---|---|
+          | **Release** | `${{ inputs.ubuntu_release || 'noble' }}` |
+          | **Desktop** | `${{ inputs.desktop_env || 'cinnamon' }}` |
+          | **Desktop Tier** | `${{ inputs.desktop_tier || 'APPGROUPS_MID' }}` |
+          | **Kernel** | 6.1 vendor (rk35xx) |
+          | **Build** | #${{ github.run_number }} |
+
+          ### Flashing
+          ```bash
+          xz -d Armbian-*.img.xz
+          sudo dd if=Armbian-*.img of=/dev/sdX bs=4M status=progress
+          ```
+
+          > Replace `/dev/sdX` with your TF card device.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build summary
       run: |
-        echo "## 🎉 编译完成！" >> $GITHUB_STEP_SUMMARY
+        echo "## Armbian Build Complete" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📥 下载镜像" >> $GITHUB_STEP_SUMMARY
-        echo "1. 点击上方的 **Actions** 标签页" >> $GITHUB_STEP_SUMMARY
-        echo "2. 找到本次编译任务" >> $GITHUB_STEP_SUMMARY
-        echo "3. 在 **Artifacts** 区域下载镜像文件" >> $GITHUB_STEP_SUMMARY
+        echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+        echo "| Release | ${{ inputs.ubuntu_release || 'noble' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Desktop | ${{ inputs.desktop_env || 'cinnamon' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Kernel | 6.1 vendor |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📋 镜像信息" >> $GITHUB_STEP_SUMMARY
-        ls -lh armbian-build/output/images/ >> $GITHUB_STEP_SUMMARY || true
+        echo "### Compressed Image" >> $GITHUB_STEP_SUMMARY
+        ls -lh armbian-build/output/images/*.xz >> $GITHUB_STEP_SUMMARY || true
