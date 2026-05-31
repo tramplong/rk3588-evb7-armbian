@@ -79,11 +79,11 @@ jobs:
         mkdir -p config/boards/
         cp ../config/boards/rk3588-evb7.csc config/boards/
     
-    - name: Apply kernel patches
+    - name: Apply kernel patches and device trees
       run: |
         cd armbian-build
         mkdir -p patch/kernel/rk35xx-vendor-6.1/
-        cp ../patch/kernel/rk35xx-vendor-6.1/*.patch patch/kernel/rk35xx-vendor-6.1/ || true
+        cp ../patch/kernel/rk35xx-vendor-6.1/* patch/kernel/rk35xx-vendor-6.1/ || true
     
     - name: Compile Armbian
       run: |
