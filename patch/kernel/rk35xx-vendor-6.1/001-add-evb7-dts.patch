@@ -8,22 +8,10 @@ evaluation board.
 
 Signed-off-by: Armbian User <user@armbian.com>
 ---
- arch/arm64/boot/dts/rockchip/Makefile        |   1 +
  arch/arm64/boot/dts/rockchip/rk3588-evb7.dts | 527 ++++++++++++++++++++++
- 2 files changed, 528 insertions(+)
+ 1 file changed, 527 insertions(+)
  create mode 100644 arch/arm64/boot/dts/rockchip/rk3588-evb7.dts
 
-diff --git a/arch/arm64/boot/dts/rockchip/Makefile b/arch/arm64/boot/dts/rockchip/Makefile
-index 0000000..1111111 100644
---- a/arch/arm64/boot/dts/rockchip/Makefile
-+++ b/arch/arm64/boot/dts/rockchip/Makefile
-@@ -1,3 +1,4 @@
- # SPDX-License-Identifier: GPL-2.0
- dtb-$(CONFIG_ARCH_ROCKCHIP) += \
-+	rk3588-evb7.dtb \
- 	rk3588-rock5b.dtb \
- 	rk3588-orangepi-5.dtb \
- 	rk3588b-rock5b.dtb \
 diff --git a/arch/arm64/boot/dts/rockchip/rk3588-evb7.dts b/arch/arm64/boot/dts/rockchip/rk3588-evb7.dts
 new file mode 100644
 index 0000000..2222222
@@ -68,7 +56,7 @@ index 0000000..2222222
 +		device_type = "memory";
 +		reg = <0x0 0x00000000 0x0 0xC0000000>, /* 3GB */
 +		      <0x0 0xC0000000 0x0 0x10000000>; /* 256MB */
-+		};
++	};
 +
 +	leds {
 +		compatible = "gpio-leds";
@@ -82,7 +70,7 @@ index 0000000..2222222
 +			gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;
 +			label = "green:status";
 +			linux,default-trigger = "heartbeat";
-+			};
++		};
 +
 +		led_work: led-1 {
 +			color = <LED_COLOR_ID_BLUE>;
@@ -91,8 +79,8 @@ index 0000000..2222222
 +			gpios = <&gpio1 RK_PB3 GPIO_ACTIVE_HIGH>;
 +			label = "blue:work";
 +			linux,default-trigger = "disk-activity";
-+			};
 +		};
++	};
 +
 +	vcc3v3_pcie: vcc3v3-pcie-regulator {
 +		compatible = "regulator-fixed";
@@ -107,7 +95,7 @@ index 0000000..2222222
 +		regulator-always-on;
 +		startup-delay-us = <5000>;
 +		vin-supply = <&vcc5v0_usbin>;
-+		};
++	};
 +
 +	vcc5v0_usbin: vcc5v0-usbin-regulator {
 +		compatible = "regulator-fixed";
@@ -117,7 +105,7 @@ index 0000000..2222222
 +		regulator-boot-on;
 +		regulator-always-on;
 +		vin-supply = <&vcc12v_dcin>;
-+		};
++	};
 +
 +	vcc12v_dcin: vcc12v-dcin {
 +		compatible = "regulator-fixed";
@@ -126,7 +114,7 @@ index 0000000..2222222
 +		regulator-max-microvolt = <12000000>;
 +		regulator-boot-on;
 +		regulator-always-on;
-+		};
++	};
 +};
 +
 +&cpu_b0 {
@@ -209,7 +197,7 @@ index 0000000..2222222
 +		interrupt-parent = <&gpio0>;
 +		interrupts = <RK_PB0 IRQ_TYPE_LEVEL_LOW>;
 +		status = "okay";
-+		};
++	};
 +};
 +
 +&i2c2 {
@@ -229,7 +217,7 @@ index 0000000..2222222
 +		regulator-enabled-ramp-delay = <400>;
 +		regulator-boot-on;
 +		regulator-always-on;
-+		};
++	};
 +
 +	vdd_cpu_big1_s0: regulator@41 {
 +		compatible = "rockchip,rk8600";
@@ -243,7 +231,7 @@ index 0000000..2222222
 +		regulator-enabled-ramp-delay = <400>;
 +		regulator-boot-on;
 +		regulator-always-on;
-+		};
++	};
 +};
 +
 +&i2c6 {
@@ -262,7 +250,7 @@ index 0000000..2222222
 +		regulator-ramp-delay = <2300>;
 +		regulator-boot-on;
 +		regulator-always-on;
-+		};
++	};
 +};
 +
 +&package_sram {
@@ -288,15 +276,15 @@ index 0000000..2222222
 +	led_pins: led-pins {
 +		led_status: led-status {
 +			rockchip,pins = <1 RK_PB2 RK_FUNC_GPIO &pcfg_pull_none>;
-+			};
++		};
 +		led_work: led-work {
 +			rockchip,pins = <1 RK_PB3 RK_FUNC_GPIO &pcfg_pull_none>;
-+			};
 +		};
++	};
 +
 +	pcie30x1_pwren: pcie30x1-pwren {
 +		rockchip,pins = <4 RK_PB1 RK_FUNC_GPIO &pcfg_pull_none>;
-+		};
++	};
 +};
 +
 +&pmuart0 {
@@ -359,7 +347,7 @@ index 0000000..2222222
 +		spi-rx-bus-width = <4>;
 +		spi-tx-bus-width = <4>;
 +		status = "okay";
-+		};
++	};
 +};
 +
 +&uart0 {
@@ -411,6 +399,3 @@ index 0000000..2222222
 +&vop_mmu {
 +	status = "okay";
 +};
--- 
-2.30.2
-
