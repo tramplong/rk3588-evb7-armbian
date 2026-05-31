@@ -1,0 +1,416 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Armbian AutoPatcher <auto@armbian.com>
+Date: Thu, 1 May 2026 00:00:00 +0000
+Subject: [PATCH] Add device tree support for RK3588 EVB7 LP4 V10 Board
+
+Add initial device tree support for Rockchip RK3588 EVB7 LP4 V10
+evaluation board.
+
+Signed-off-by: Armbian User <user@armbian.com>
+---
+ arch/arm64/boot/dts/rockchip/Makefile        |   1 +
+ arch/arm64/boot/dts/rockchip/rk3588-evb7.dts | 527 ++++++++++++++++++++++
+ 2 files changed, 528 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/rockchip/rk3588-evb7.dts
+
+diff --git a/arch/arm64/boot/dts/rockchip/Makefile b/arch/arm64/boot/dts/rockchip/Makefile
+index 0000000..1111111 100644
+--- a/arch/arm64/boot/dts/rockchip/Makefile
++++ b/arch/arm64/boot/dts/rockchip/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += \
++	rk3588-evb7.dtb \
+ 	rk3588-rock5b.dtb \
+ 	rk3588-orangepi-5.dtb \
+ 	rk3588b-rock5b.dtb \
+diff --git a/arch/arm64/boot/dts/rockchip/rk3588-evb7.dts b/arch/arm64/boot/dts/rockchip/rk3588-evb7.dts
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/arch/arm64/boot/dts/rockchip/rk3588-evb7.dts
+@@ -0,0 +1,527 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * Device Tree for Rockchip RK3588 EVB7 LP4 V10 Board
++ *
++ * Copyright (c) 2024 Rockchip Electronics Co., Ltd.
++ * Copyright (c) 2026 Armbian Community
++ */
++
++/dts-v1/;
++#include "rk3588.dtsi"
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/leds/common.h>
++#include <dt-bindings/pinctrl/rockchip.h>
++
++/ {
++	model = "Rockchip RK3588 EVB7 LP4 V10 Board";
++	compatible = "rockchip,rk3588-evb7", "rockchip,rk3588";
++
++	aliases {
++		mmc0 = &sdmmc;
++		mmc1 = &sdhci;
++		mmc2 = &sdio0;
++		serial0 = &uart0;
++		serial1 = &uart1;
++		serial2 = &uart2;
++		serial7 = &uart7;
++		ethernet0 = &gmac0;
++		ethernet1 = &gmac1;
++	};
++
++	chosen {
++		stdout-path = "serial2:1500000n8";
++	};
++
++	memory@00000000 {
++		device_type = "memory";
++		reg = <0x0 0x00000000 0x0 0xC0000000>, /* 3GB */
++		      <0x0 0xC0000000 0x0 0x10000000>; /* 256MB */
++		};
++
++	leds {
++		compatible = "gpio-leds";
++		pinctrl-names = "default";
++		pinctrl-0 = <&led_pins>;
++
++		led_status: led-0 {
++			color = <LED_COLOR_ID_GREEN>;
++			default-state = "on";
++			function = LED_FUNCTION_STATUS;
++			gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;
++			label = "green:status";
++			linux,default-trigger = "heartbeat";
++			};
++
++		led_work: led-1 {
++			color = <LED_COLOR_ID_BLUE>;
++			default-state = "off";
++			function = LED_FUNCTION_DISK;
++			gpios = <&gpio1 RK_PB3 GPIO_ACTIVE_HIGH>;
++			label = "blue:work";
++			linux,default-trigger = "disk-activity";
++			};
++		};
++
++	vcc3v3_pcie: vcc3v3-pcie-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "vcc3v3_pcie";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		enable-active-high;
++		gpio = <&gpio4 RK_PB1 GPIO_ACTIVE_HIGH>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&pcie30x1_pwren>;
++		regulator-boot-on;
++		regulator-always-on;
++		startup-delay-us = <5000>;
++		vin-supply = <&vcc5v0_usbin>;
++		};
++
++	vcc5v0_usbin: vcc5v0-usbin-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "vcc5v0_usbin";
++		regulator-min-microvolt = <5000000>;
++		regulator-max-microvolt = <5000000>;
++		regulator-boot-on;
++		regulator-always-on;
++		vin-supply = <&vcc12v_dcin>;
++		};
++
++	vcc12v_dcin: vcc12v-dcin {
++		compatible = "regulator-fixed";
++		regulator-name = "vcc12v_dcin";
++		regulator-min-microvolt = <12000000>;
++		regulator-max-microvolt = <12000000>;
++		regulator-boot-on;
++		regulator-always-on;
++		};
++};
++
++&cpu_b0 {
++	cpu-supply = <&vdd_cpu_big0_s0>;
++};
++
++&cpu_b1 {
++	cpu-supply = <&vdd_cpu_big0_s0>;
++};
++
++&cpu_b2 {
++	cpu-supply = <&vdd_cpu_big1_s0>;
++};
++
++&dfi {
++	status = "okay";
++};
++
++&dmc {
++	operating-points-v2 = <&dmc_opp_table>;
++	status = "okay";
++};
++
++&gmac0 {
++	phy-mode = "rgmii";
++	clock-inverter;
++	snps,reset-gpio = <&gpio4 RK_PB6 GPIO_ACTIVE_LOW>;
++	snps,reset-delays-us = <0 20000 100000>;
++	assigned-clocks = <&cru CLK_GMAC_125M_BUS4>, <&cru CLK_GMAC_-125M>;
++	assigned-clock-parents = <&cru CLK_GMAC_RGMII_SPEED>, <&cru CLK_GMAC_125M>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&gmac0_miim &gmac0_tx_bus2 &gmac0_rx_bus4 &gmac0_rgmii_clock &gmac0_rgmii_bus>;
++	status = "okay";
++};
++
++&gmac1 {
++	phy-mode = "rgmii";
++	clock-inverter;
++	snps,reset-gpio = <&gpio4 RK_PC5 GPIO_ACTIVE_LOW>;
++	snps,reset-delays-us = <0 20000 100000>;
++	assigned-clocks = <&cru CLK_GMAC_125M_BUS5>, <&cru CLK_GMAC_-125M>;
++	assigned-clock-parents = <&cru CLK_GMAC_RGMII_SPEED>, <&cru CLK_GMAC_125M>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&gmac1_miim &gmac1_tx_bus2 &gmac1_rx_bus4 &gmac1_rgmii_clock &gmac1_rgmii_bus>;
++	status = "okay";
++};
++
++&gpu {
++	mali-supply = <&vdd_gpu_s0>;
++	status = "okay";
++};
++
++&hdmi0 {
++	avdd-supply = <&vcc0v9_hdmi>;
++	status = "okay";
++};
++
++&hdmi0_in_vp0 {
++	status = "okay";
++};
++
++&hdmi1 {
++	avdd-supply = <&vcc0v9_hdmi>;
++	status = "okay";
++};
++
++&hdmi1_in_vp1 {
++	status = "okay";
++};
++
++&i2c1 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c1_xfer>;
++
++	rtc@51 {
++		compatible = "nxp,pcf8563";
++		reg = <0x51>;
++		#clock-cells = <0>;
++		interrupt-parent = <&gpio0>;
++		interrupts = <RK_PB0 IRQ_TYPE_LEVEL_LOW>;
++		status = "okay";
++		};
++};
++
++&i2c2 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c2_xfer>;
++
++	vdd_cpu_big0_s0: regulator@40 {
++		compatible = "rockchip,rk8600";
++		reg = <0x40>;
++		vin-supply = <&vcc5v0_usbin>;
++		regulator-compatible = "rk8600";
++		regulator-name = "vdd_cpu_big0_s0";
++		regulator-min-microvolt = <500000>;
++		regulator-max-microvolt = <1075000>;
++		regulator-ramp-delay = <2300>;
++		regulator-enabled-ramp-delay = <400>;
++		regulator-boot-on;
++		regulator-always-on;
++		};
++
++	vdd_cpu_big1_s0: regulator@41 {
++		compatible = "rockchip,rk8600";
++		reg = <0x41>;
++		vin-supply = <&vcc5v0_usbin>;
++		regulator-compatible = "rk8600";
++		regulator-name = "vdd_cpu_big1_s0";
++		regulator-min-microvolt = <500000>;
++		regulator-max-microvolt = <1075000>;
++		regulator-ramp-delay = <2300>;
++		regulator-enabled-ramp-delay = <400>;
++		regulator-boot-on;
++		regulator-always-on;
++		};
++};
++
++&i2c6 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c6_xfer>;
++
++	vdd_gpu_s0: regulator@40 {
++		compatible = "rockchip,rk8600";
++		reg = <0x40>;
++		vin-supply = <&vcc5v0_usbin>;
++		regulator-compatible = "rk8600";
++		regulator-name = "vdd_gpu_s0";
++		regulator-min-microvolt = <500000>;
++		regulator-max-microvolt = <1075000>;
++		regulator-ramp-delay = <2300>;
++		regulator-boot-on;
++		regulator-always-on;
++		};
++};
++
++&package_sram {
++	status = "okay";
++};
++
++&pcie2x1l0 {
++	status = "okay";
++	vpcie3v3-supply = <&vcc3v3_pcie>;
++};
++
++&pcie2x1l2 {
++	status = "okay";
++	vpcie3v3-supply = <&vcc3v3_pcie>;
++};
++
++&pcie30x4 {
++	status = "okay";
++	vpcie3v3-supply = <&vcc3v3_pcie>;
++};
++
++&pinctrl {
++	led_pins: led-pins {
++		led_status: led-status {
++			rockchip,pins = <1 RK_PB2 RK_FUNC_GPIO &pcfg_pull_none>;
++			};
++		led_work: led-work {
++			rockchip,pins = <1 RK_PB3 RK_FUNC_GPIO &pcfg_pull_none>;
++			};
++		};
++
++	pcie30x1_pwren: pcie30x1-pwren {
++		rockchip,pins = <4 RK_PB1 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++};
++
++&pmuart0 {
++	status = "okay";
++};
++
++&sata0 {
++	status = "okay";
++};
++
++&sata1 {
++	status = "okay";
++};
++
++&sdhci {
++	bus-width = <8>;
++	no-sd;
++	no-sdio;
++	non-removable;
++	max-frequency = <200000000>;
++	mmc-hs400-1_8v;
++	mmc-hs400-enhanced-strobe;
++	status = "okay";
++};
++
++&sdio0 {
++	bus-width = <4>;
++	disable-wp;
++	cap-sd-highspeed;
++	cap-sdio-irq;
++	keep-power-in-suspend;
++	mmc-pwrseq = <&sdio_pwrseq>;
++	non-removable;
++	pinctrl-names = "default";
++	pinctrl-0 = <&sdi0_clk &sdi0_cmd &sdi0_bus4>;
++	supports-sdio;
++	status = "okay";
++};
++
++&sdmmc {
++	bus-width = <4>;
++	cap-mmc-highspeed;
++	cap-sd-highspeed;
++	cd-gpios = <&gpio0 RK_PA4 GPIO_ACTIVE_LOW>;
++	disable-wp;
++	pinctrl-names = "default";
++	pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_det &sdmmc_bus4>;
++	status = "okay";
++};
++
++&spi0 {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&spi0m0_cs0 &spi0m0_clk &spi0m0_mosi &spi0m0_miso &spi0m0_cs1>;
++
++	flash@0 {
++		compatible = "jedec,spi-nor";
++		reg = <0x0>;
++		spi-max-frequency = <50000000>;
++		spi-rx-bus-width = <4>;
++		spi-tx-bus-width = <4>;
++		status = "okay";
++		};
++};
++
++&uart0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart0_xfer &uart0_ctsn &uart0_rtsn>;
++	status = "okay";
++};
++
++&uart2 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart2m1_xfer>;
++	status = "okay";
++};
++
++&uart7 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart7m1_xfer>;
++	status = "okay";
++};
++
++&usb_host0_ehci {
++	status = "okay";
++};
++
++&usb_host0_ohci {
++	status = "okay";
++};
++
++&usb_host1_ehci {
++	status = "okay";
++};
++
++&usb_host1_ohci {
++	status = "okay";
++};
++
++&usbdp_phy0 {
++	status = "okay";
++};
++
++&usbdp_phy1 {
++	status = "okay";
++};
++
++&vop {
++	status = "okay";
++};
++
++&vop_mmu {
++	status = "okay";
++};
+-- 
+2.30.2
+

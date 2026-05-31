@@ -1,0 +1,35 @@
+# 编译输出
+output/
+cache/
+.build/
+
+# 日志文件
+*.log
+*.ans
+
+# 临时文件
+tmp/
+.tmp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# IDE 文件
+.vscode/
+.idea/
+*.sublime-*
+
+# OS 文件
+.DS_Store
+Thumbs.db
+ desktop.ini
+
+# 用户文件
+userpatches/
+userdata/
+
+# 密钥文件
+*.pem
+*.key
+*.pub
