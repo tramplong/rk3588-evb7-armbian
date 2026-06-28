@@ -111,9 +111,12 @@ jobs:
         IMG=$(ls *.img 2>/dev/null | head -1)
         if [ -n "$IMG" ]; then
           echo "Compressing: $IMG"
-          xz -T0 -v "$IMG"
+          # Use stdout redirection to avoid xz trying to preserve source file group/owner
+          # (xz otherwise calls fchown() on the .xz file, which fails on GitHub Actions runner)
+          xz -T0 -9 -v -c "$IMG" > "$IMG.xz"
           echo "IMG_XZ=$IMG.xz" >> $GITHUB_ENV
           sha256sum "$IMG.xz" > "$IMG.xz.sha256"
+          ls -lh "$IMG.xz"
         fi
 
     - name: Upload artifact
