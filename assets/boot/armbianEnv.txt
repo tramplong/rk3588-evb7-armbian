@@ -1,0 +1,8 @@
+verbosity=1
+bootlogo=true
+console=both
+extraargs=cma=256M
+overlay_prefix=rockchip-rk3588
+fdtfile=rockchip/rk3588-evb7.dtb
+rootdev=UUID=472439f3-fc43-4c91-8d3b-ed3299b3defe
+rootfstype=ext4

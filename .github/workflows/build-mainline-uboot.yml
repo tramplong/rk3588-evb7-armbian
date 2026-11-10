@@ -1,51 +1,51 @@
-# =============================================================================
-# 云端编译主线 U-Boot —— 给 Windows 用户用，本地完全不用装 Linux
-#
-# 用途：修复 RK3588 EVB7 的 TF 卡启动阻塞
+name: Build mainline U-Boot (RK3588 EVB7)
+
+# 用途：产出主线 U-Boot 的 u-boot-rockchip.bin，修复 TF 卡启动的 OP-TEE 阻塞
 #   optee check api revision fail: -1.0 / ### ERROR ### Please RESET the board ###
 # 主线 U-Boot 没有 vendor OP-TEE 检查，且带标准 distro boot。
 #
-# 产物：u-boot-rockchip.bin（约 2–9 MiB）作为 Artifact 下载，
-#       在 Windows 上用 tools/patch-bootloader.py 注入镜像，或直写 TF 卡 sector 64。
+# 两种触发方式（任选）：
+#   1) Actions 页 -> 本 workflow -> Run workflow
+#   2) 编辑并提交 trigger-mainline-uboot.txt（网页上点铅笔改个数字即可）
 #
-# ⚠ 推到 main 会触发仓库里另一个 workflow（compile-armbian.yml，8 小时编译）。
-#   推完后到 Actions 页把那次 run 取消即可；或给 compile-armbian.yml 的 push 加
-#   paths-ignore: ['.github/workflows/build-mainline-uboot.yml']
-# =============================================================================
-name: Build mainline U-Boot (RK3588 EVB7)
+# 产物：Artifact rk3588-evb7-mainline-uboot 里的 u-boot-rockchip.bin
+# 写卡：dd if=u-boot-rockchip.bin of=/dev/sdX bs=512 seek=64 conv=fsync,notrunc
+#       Windows 见仓库 windows/README.md 或 docs/README-Windows.md
 
 on:
   workflow_dispatch:
     inputs:
       uboot_ref:
         description: 'u-boot tag / branch'
-        required: true
+        required: false
         default: 'v2025.04'
         type: string
       defconfig:
-        description: 'defconfig (主线 EVB 配置)'
-        required: true
+        description: 'defconfig'
+        required: false
         default: 'evb-rk3588_defconfig'
         type: string
-      ddr_version:
-        description: 'rkbin DDR bin 版本关键字（板上实测 v1.17）'
-        required: true
-        default: 'v1.17'
-        type: string
-      bl31_version:
-        description: 'rkbin BL31 版本关键字（本次日志 v1.48）'
-        required: true
-        default: 'v1.48'
-        type: string
+  push:
+    branches: [main]
+    paths:
+      - 'trigger-mainline-uboot.txt'
 
 permissions:
   contents: read
+
+env:
+  TZ: Asia/Shanghai
+  # workflow_dispatch 才有 inputs；push 触发时走默认值
+  UB_REF: ${{ inputs.uboot_ref || 'v2025.04' }}
+  DEFCONFIG: ${{ inputs.defconfig || 'evb-rk3588_defconfig' }}
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - uses: actions/checkout@v4
+
       - name: Install cross toolchain
         run: |
           sudo apt-get update -y
@@ -56,77 +56,73 @@ jobs:
             libssl-dev libgnutls28-dev libncurses-dev u-boot-tools coreutils
 
       - name: Clone u-boot + rkbin
-        env:
-          REF: ${{ inputs.uboot_ref }}
         run: |
+          set -e
           mkdir -p work
-          git clone --depth 1 --branch "$REF" \
+          echo "u-boot ref: $UB_REF"
+          git clone --depth 1 --branch "$UB_REF" \
             https://source.denx.de/u-boot/u-boot.git work/u-boot \
             || git clone --depth 1 https://github.com/u-boot/u-boot.git work/u-boot
           git clone --depth 1 https://github.com/rockchip-linux/rkbin.git work/rkbin
           git -C work/u-boot describe --always --tags || true
           git -C work/rkbin rev-parse --short HEAD
 
-      - name: Pick DDR / BL31 blobs
-        env:
-          DDRV: ${{ inputs.ddr_version }}
-          BL31V: ${{ inputs.bl31_version }}
+      - name: "Pick DDR / BL31 blobs (board DDR v1.17, BL31 v1.48)"
         run: |
           set -Eeuo pipefail
+          # 板上实测 LPDDR4X 2112MHz / DDR fwver v1.17
           DDR=$(find work/rkbin/bin/rk35 -maxdepth 1 -type f \
-                  -iname 'rk3588_ddr_lp4_2112MHz*' | grep -F "$DDRV" | head -1 || true)
+                  -iname 'rk3588_ddr_lp4_2112MHz*' | grep -F 'v1.17' | head -1 || true)
           [ -n "$DDR" ] || DDR=$(find work/rkbin/bin/rk35 -maxdepth 1 -type f \
                   -iname 'rk3588_ddr_lp4_2112MHz*' | sort -V | tail -1)
           BL31=$(find work/rkbin/bin/rk35 -maxdepth 1 -type f \
-                  -iname "rk3588_bl31_${BL31V}*.elf" | head -1 || true)
+                  -iname 'rk3588_bl31_v1.48*.elf' | head -1 || true)
           [ -n "$BL31" ] || BL31=$(find work/rkbin/bin/rk35 -maxdepth 1 -type f \
                   -iname 'rk3588_bl31_*.elf' | sort -V | tail -1)
           test -s "$DDR"  || { echo "DDR bin not found";  exit 1; }
           test -s "$BL31" || { echo "BL31 elf not found"; exit 1; }
-          echo "ROCKCHIP_TPL=$(realpath "$DDR")"  >> "$GITHUB_ENV"
-          echo "BL31=$(realpath "$BL31")"          >> "$GITHUB_ENV"
-          echo "DDR_NAME=$(basename "$DDR")"       >> "$GITHUB_ENV"
-          echo "BL31_NAME=$(basename "$BL31")"     >> "$GITHUB_ENV"
+          echo "ROCKCHIP_TPL=$(realpath "$DDR")" >> "$GITHUB_ENV"
+          echo "BL31=$(realpath "$BL31")"         >> "$GITHUB_ENV"
+          echo "DDR_NAME=$(basename "$DDR")"      >> "$GITHUB_ENV"
+          echo "BL31_NAME=$(basename "$BL31")"    >> "$GITHUB_ENV"
+          echo "  DDR : $DDR"
+          echo "  BL31: $BL31"
 
       - name: Build
-        env:
-          DEFCONFIG: ${{ inputs.defconfig }}
         run: |
           set -Eeuo pipefail
           cd work/u-boot
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
+          echo "defconfig: $DEFCONFIG"
           test -f "configs/$DEFCONFIG" || {
             echo "defconfig 不存在，可用 rk3588 配置：";
             ls configs/*rk3588*defconfig | xargs -n1 basename; exit 1; }
           make "$DEFCONFIG"
-          make -j"$(nproc)" 2>&1 | tee ../build.log
+          make -j"$(nproc)"
           test -s u-boot-rockchip.bin
           mkdir -p ../../out
           cp -f u-boot-rockchip.bin ../../out/
-          cd ../..
-          head -c4 out/u-boot-rockchip.bin | od -An -c
-          sha256sum out/u-boot-rockchip.bin > out/u-boot-rockchip.bin.sha256
 
-      - name: Verify image magic + write build info
+      - name: Verify + build info
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
-          import sys
-          h=open('out/u-boot-rockchip.bin','rb').read(4)
-          print('magic:',h)
-          sys.exit(0 if h==b'RKNS' else 1)
+          h = open('out/u-boot-rockchip.bin','rb').read(4)
+          print('magic:', h)
+          assert h == b'RKNS', 'not a binman u-boot-rockchip.bin'
           PY
+          sha256sum out/u-boot-rockchip.bin > out/u-boot-rockchip.bin.sha256
           {
-            echo "uboot_ref    : ${{ inputs.uboot_ref }}"
-            echo "defconfig    : ${{ inputs.defconfig }}"
+            echo "uboot_ref    : $UB_REF"
+            echo "defconfig    : $DEFCONFIG"
             echo "DDR bin      : $DDR_NAME"
             echo "BL31         : $BL31_NAME"
             echo "u-boot commit: $(git -C work/u-boot rev-parse --short HEAD)"
             echo "rkbin commit : $(git -C work/rkbin rev-parse --short HEAD)"
             echo ""
-            echo "写入方式: dd if=u-boot-rockchip.bin of=/dev/sdX bs=512 seek=64 conv=fsync,notrunc"
-            echo "Windows: 见 rk3588-evb7-armbian/windows/README.md"
+            echo "Linux : dd if=u-boot-rockchip.bin of=/dev/sdX bs=512 seek=64 conv=fsync,notrunc"
+            echo "Windows: see windows/README.md in this repo"
           } > out/build-info.txt
           cat out/build-info.txt
           ls -lh out/

@@ -1,0 +1,11 @@
+# Trigger file for "Build mainline U-Boot (RK3588 EVB7)".
+#
+# Edit this file (even just bump the number below) and commit to main
+# to automatically rebuild u-boot-rockchip.bin on GitHub Actions.
+# Alternatively use Actions -> Run workflow, no file change needed.
+#
+# Artifact: rk3588-evb7-mainline-uboot / u-boot-rockchip.bin
+# Flash    : dd if=u-boot-rockchip.bin of=/dev/sdX bs=512 seek=64 conv=fsync,notrunc
+# Windows  : see windows/README.md
+
+build: 1
