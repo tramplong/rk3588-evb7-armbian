@@ -89,13 +89,30 @@ jobs:
       # EVB1 has no TF slot. EVB7 boots from SDMMC (mmc@fe2c0000) with the
       # sdmmc-det pin on GPIO0_A4 -- which is IDENTICAL in the EVB1 DTS, so
       # only the status and the SPL boot order need fixing, no pin changes.
+      # EVB1 has no TF slot. EVB7 boots from SDMMC (mmc@fe2c0000) with the
+      # sdmmc-det pin on GPIO0_A4 -- IDENTICAL in the EVB1 DTS, so only the
+      # status and the SPL boot order need fixing, no pin changes.
+      #
+      # IMPORTANT: do NOT append "&chosen { ... }". In this tree `chosen` is
+      # created as /{ chosen { ... } } and has NO label, so dtc fails with
+      # "Label or path chosen not found". Instead edit the existing line in
+      # place. "&sdmmc" is safe (rk3588s-u-boot.dtsi already uses that label).
       - name: Patch EVB1 DTS for EVB7 TF card boot
         if: ${{ env.SD_FIX == 'yes' }}
         run: |
           set -Eeuo pipefail
           DTSI=work/u-boot/arch/arm/dts/rk3588-evb1-v10-u-boot.dtsi
           test -f "$DTSI" || { echo "DTSI not found: $DTSI"; exit 1; }
-          # -u-boot.dtsi is included LAST, so these overrides win.
+
+          OLD='u-boot,spl-boot-order = "same-as-spl", &sdhci;'
+          grep -qF "$OLD" "$DTSI" || {
+            echo "Unexpected DTSI content (spl-boot-order line not found):"
+            cat "$DTSI"; exit 1; }
+          sed -i 's|u-boot,spl-boot-order = "same-as-spl", &sdhci;|u-boot,spl-boot-order = "same-as-spl", \&sdmmc, \&sdhci;|' "$DTSI"
+          grep -qF 'u-boot,spl-boot-order = "same-as-spl", &sdmmc, &sdhci;' "$DTSI" || {
+            echo "sed failed to update spl-boot-order"; cat "$DTSI"; exit 1; }
+
+          # -u-boot.dtsi is included LAST, so this &sdmmc override wins.
           cat >> "$DTSI" <<'DTS'
 
           /* RK3588 EVB7 LP4 V10: TF card on SDMMC (injected by CI) */
@@ -106,14 +123,11 @@ jobs:
                   no-mmc;
                   cap-sd-highspeed;
                   disable-wp;
-          };
-
-          &chosen {
-                  u-boot,spl-boot-order = "same-as-spl", &sdmmc, &sdhci;
+                  broken-cd;
           };
           DTS
           echo "--- patched $DTSI ---"
-          tail -20 "$DTSI"
+          cat "$DTSI"
 
       - name: Pick DDR and BL31 blobs
         run: |

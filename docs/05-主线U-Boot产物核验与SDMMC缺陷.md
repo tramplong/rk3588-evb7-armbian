@@ -140,10 +140,19 @@ BL31    : rk3588_bl31_v1.56.elf
 
 ## 四、已做的修复
 
-`github-relink/upload/.github/workflows/build-mainline-uboot.yml`（rev2）：
+`github-relink/upload/.github/workflows/build-mainline-uboot.yml`（**rev3**）：
 
-1. 新增 `sd_fix` 输入（默认 `yes`）：编译前往
-   `arch/arm/dts/rk3588-evb1-v10-u-boot.dtsi` 追加：
+1. 新增 `sd_fix` 输入（默认 `yes`）。编译前对
+   `arch/arm/dts/rk3588-evb1-v10-u-boot.dtsi` 做两处改动：
+
+   **a) 就地 sed 替换**已有的启动顺序行：
+   ```
+   u-boot,spl-boot-order = "same-as-spl", &sdhci;
+   → u-boot,spl-boot-order = "same-as-spl", &sdmmc, &sdhci;
+   ```
+   替换前后各有一道 `grep -qF` 断言，上游文件一变就立刻报错而不是静默产出坏 bin。
+
+   **b) 末尾追加**（`-u-boot.dtsi` 最后被 include，覆盖生效）：
    ```dts
    &sdmmc {
        status = "okay";
@@ -152,12 +161,13 @@ BL31    : rk3588_bl31_v1.56.elf
        no-mmc;
        cap-sd-highspeed;
        disable-wp;
-   };
-   &chosen {
-       u-boot,spl-boot-order = "same-as-spl", &sdmmc, &sdhci;
+       broken-cd;
    };
    ```
-   `-u-boot.dtsi` 是最后被 include 的，覆盖一定生效。
+   `broken-cd` 避免 SPL 等待主线 DTS 里不存在的 `cd-gpios`
+   （主线能启动的 orangepi-5-plus 用的是 `<&gpio0 RK_PA4 GPIO_ACTIVE_LOW>`，
+   正是 EVB7 的 GPIO0_A4；EVB1 的 pinctrl 已含 `&sdmmc_det`，故用 broken-cd 更省依赖）。
+
 2. 新增 `rkbin_ref` 输入，可 pin 旧 blob。
 3. DDR 选择排除 `eyescan` / `single` 变体。
 4. **编译后门禁**：解析产物 FIT → 找到控制 DTB → 断言
@@ -165,7 +175,26 @@ BL31    : rk3588_bl31_v1.56.elf
    同时校验 `RKNS`、FIT@`0x7F8000`、各数据段边界、`< 16 MiB`。
    该门禁已用**当前这个坏 bin 实测验证**，能正确报
    `SDMMC disabled: SPL cannot find the FIT on the TF card`。
-5. `trigger-mainline-uboot.txt` bump 到 `build: 2`。
+5. `trigger-mainline-uboot.txt` bump 到 `build: 3`。
+
+### ⚠ rev2 编译失败记录（2026-11-10 23:2x，已修）
+
+```
+Error: ./arch/arm/dts/rk3588-evb1-v10-u-boot.dtsi:24.1-8
+       Label or path chosen not found
+FATAL ERROR: Syntax error parsing input tree
+```
+
+根因：rev2 追加了 `&chosen { ... }`。这棵设备树的 `chosen` 是在
+`/ { chosen { ... }; };` 里**直接创建的，没有 label**，因此 `&chosen` 引用非法；
+报错行号 24 正好对应追加块里的那一行。`&sdmmc` 则安全——
+label 定义在 `rk3588-base.dtsi:1872`（`sdmmc: mmc@fe2c0000 { ... }`），
+`&sdhci` 同样在 1902 行。
+
+rev3 改为「sed 改原行 + 只追加 `&sdmmc`」。已用 GitHub API 拉取
+U-Boot v2025.04 的**真实 DTSI 原文**，在本地完整模拟该 shell 步骤
+（exit 0），并断言输出中无 `&chosen`、启动顺序含 `&sdmmc`、`status = "okay"`、
+`broken-cd` 均存在。本机无 `dtc`，最终编译仍以 Actions 为准。
 
 另修 `push-to-github.py --download` 一个小问题：artifact 自带的
 `.sha256` 里写的是 runner 路径 `out/u-boot-rockchip.bin`，会覆盖本地生成的
