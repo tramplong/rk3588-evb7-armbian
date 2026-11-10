@@ -8,4 +8,4 @@
 # Flash    : dd if=u-boot-rockchip.bin of=/dev/sdX bs=512 seek=64 conv=fsync,notrunc
 # Windows  : see windows/README.md
 
-build: 1
+build: 2

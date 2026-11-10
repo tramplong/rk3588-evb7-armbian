@@ -1,16 +1,18 @@
 name: Build mainline U-Boot (RK3588 EVB7)
 
-# 用途：产出主线 U-Boot 的 u-boot-rockchip.bin，修复 TF 卡启动的 OP-TEE 阻塞
+# Produces u-boot-rockchip.bin to fix the SD-boot OP-TEE blocker:
 #   optee check api revision fail: -1.0 / ### ERROR ### Please RESET the board ###
-# 主线 U-Boot 没有 vendor OP-TEE 检查，且带标准 distro boot。
+# Mainline U-Boot has no vendor OP-TEE check and provides standard distro boot.
 #
-# 两种触发方式（任选）：
-#   1) Actions 页 -> 本 workflow -> Run workflow
-#   2) 编辑并提交 trigger-mainline-uboot.txt（网页上点铅笔改个数字即可）
+# 2026-11-10 rev2 (verified by dissecting the produced FIT):
+#   evb-rk3588_defconfig uses the EVB1 board DTS, where the SDMMC controller
+#   (mmc@fe2c0000 = the TF card) is status="disabled" and spl-boot-order lists
+#   only eMMC (&sdhci). That stops SPL from finding the FIT on the TF card --
+#   a failure EARLIER than the OP-TEE one. This workflow patches the DTS.
 #
-# 产物：Artifact rk3588-evb7-mainline-uboot 里的 u-boot-rockchip.bin
-# 写卡：dd if=u-boot-rockchip.bin of=/dev/sdX bs=512 seek=64 conv=fsync,notrunc
-#       Windows 见仓库 windows/README.md 或 docs/README-Windows.md
+# Trigger: Actions -> Run workflow, or edit trigger-mainline-uboot.txt and commit.
+# Flash  : dd if=u-boot-rockchip.bin of=/dev/sdX bs=512 seek=64 conv=fsync,notrunc
+# Windows: see windows/README.md in this repo.
 
 on:
   workflow_dispatch:
@@ -25,19 +27,31 @@ on:
         required: false
         default: 'evb-rk3588_defconfig'
         type: string
+      sd_fix:
+        description: 'Patch EVB1 DTS to enable the TF/SD card on EVB7'
+        required: false
+        default: 'yes'
+        type: choice
+        options: ['yes', 'no']
+      rkbin_ref:
+        description: 'Pin rkbin commit to get DDR v1.17 / BL31 v1.48 (blank = latest)'
+        required: false
+        default: ''
+        type: string
   push:
     branches: [main]
-    paths:
-      - 'trigger-mainline-uboot.txt'
+    paths: ['trigger-mainline-uboot.txt']
 
 permissions:
   contents: read
 
 env:
   TZ: Asia/Shanghai
-  # workflow_dispatch 才有 inputs；push 触发时走默认值
+  # inputs.* is empty on push events, so always provide a default
   UB_REF: ${{ inputs.uboot_ref || 'v2025.04' }}
   DEFCONFIG: ${{ inputs.defconfig || 'evb-rk3588_defconfig' }}
+  SD_FIX: ${{ inputs.sd_fix || 'yes' }}
+  RKBIN_REF: ${{ inputs.rkbin_ref || '' }}
 
 jobs:
   build:
@@ -63,18 +77,57 @@ jobs:
           git clone --depth 1 --branch "$UB_REF" \
             https://source.denx.de/u-boot/u-boot.git work/u-boot \
             || git clone --depth 1 https://github.com/u-boot/u-boot.git work/u-boot
-          git clone --depth 1 https://github.com/rockchip-linux/rkbin.git work/rkbin
+          if [ -n "$RKBIN_REF" ]; then
+            git clone https://github.com/rockchip-linux/rkbin.git work/rkbin
+            git -C work/rkbin checkout "$RKBIN_REF"
+          else
+            git clone --depth 1 https://github.com/rockchip-linux/rkbin.git work/rkbin
+          fi
           git -C work/u-boot describe --always --tags || true
-          git -C work/rkbin rev-parse --short HEAD
+          echo "rkbin commit: $(git -C work/rkbin rev-parse --short HEAD)"
 
-      - name: "Pick DDR / BL31 blobs (board DDR v1.17, BL31 v1.48)"
+      # EVB1 has no TF slot. EVB7 boots from SDMMC (mmc@fe2c0000) with the
+      # sdmmc-det pin on GPIO0_A4 -- which is IDENTICAL in the EVB1 DTS, so
+      # only the status and the SPL boot order need fixing, no pin changes.
+      - name: Patch EVB1 DTS for EVB7 TF card boot
+        if: ${{ env.SD_FIX == 'yes' }}
         run: |
           set -Eeuo pipefail
-          # 板上实测 LPDDR4X 2112MHz / DDR fwver v1.17
+          DTSI=work/u-boot/arch/arm/dts/rk3588-evb1-v10-u-boot.dtsi
+          test -f "$DTSI" || { echo "DTSI not found: $DTSI"; exit 1; }
+          # -u-boot.dtsi is included LAST, so these overrides win.
+          cat >> "$DTSI" <<'DTS'
+
+          /* RK3588 EVB7 LP4 V10: TF card on SDMMC (injected by CI) */
+          &sdmmc {
+                  status = "okay";
+                  bus-width = <4>;
+                  no-sdio;
+                  no-mmc;
+                  cap-sd-highspeed;
+                  disable-wp;
+          };
+
+          &chosen {
+                  u-boot,spl-boot-order = "same-as-spl", &sdmmc, &sdhci;
+          };
+          DTS
+          echo "--- patched $DTSI ---"
+          tail -20 "$DTSI"
+
+      - name: Pick DDR and BL31 blobs
+        run: |
+          set -Eeuo pipefail
+          # The board logs show DDR v1.17 / BL31 v1.48. Upstream rkbin has
+          # removed them (only v1.24 / v1.56 remain as of 2026-11), so prefer
+          # the exact versions when available and otherwise take the newest.
+          # Exclude eyescan / single_vdd2 variants which are not normal boots.
           DDR=$(find work/rkbin/bin/rk35 -maxdepth 1 -type f \
-                  -iname 'rk3588_ddr_lp4_2112MHz*' | grep -F 'v1.17' | head -1 || true)
+                  -iname 'rk3588_ddr_lp4_2112MHz*' ! -iname '*eyescan*' \
+                  ! -iname '*single*' | grep -F 'v1.17' | head -1 || true)
           [ -n "$DDR" ] || DDR=$(find work/rkbin/bin/rk35 -maxdepth 1 -type f \
-                  -iname 'rk3588_ddr_lp4_2112MHz*' | sort -V | tail -1)
+                  -iname 'rk3588_ddr_lp4_2112MHz*' ! -iname '*eyescan*' \
+                  ! -iname '*single*' | sort -V | tail -1)
           BL31=$(find work/rkbin/bin/rk35 -maxdepth 1 -type f \
                   -iname 'rk3588_bl31_v1.48*.elf' | head -1 || true)
           [ -n "$BL31" ] || BL31=$(find work/rkbin/bin/rk35 -maxdepth 1 -type f \
@@ -96,7 +149,7 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           echo "defconfig: $DEFCONFIG"
           test -f "configs/$DEFCONFIG" || {
-            echo "defconfig 不存在，可用 rk3588 配置：";
+            echo "defconfig not found, available rk3588 configs:";
             ls configs/*rk3588*defconfig | xargs -n1 basename; exit 1; }
           make "$DEFCONFIG"
           make -j"$(nproc)"
@@ -104,24 +157,86 @@ jobs:
           mkdir -p ../../out
           cp -f u-boot-rockchip.bin ../../out/
 
-      - name: Verify + build info
+      - name: Verify payload layout + build info
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
-          h = open('out/u-boot-rockchip.bin','rb').read(4)
-          print('magic:', h)
-          assert h == b'RKNS', 'not a binman u-boot-rockchip.bin'
+          import struct
+
+          def dtb_props(blob):
+              """Parse a flattened device tree -> {node_path: {prop: raw_bytes}}"""
+              h = struct.unpack_from('>10I', blob, 0)
+              assert h[0] == 0xd00dfeed, 'bad DTB magic'
+              off_struct, off_strings = h[2], h[3]
+              size_strings, size_struct = h[8], h[9]
+              sb = blob[off_strings:off_strings + size_strings]
+              st = blob[off_struct:off_struct + size_struct]
+              def pname(o):
+                  e = sb.find(b'\0', o)
+                  return sb[o:e].decode('ascii', 'replace')
+              out, stack, i = {}, [], 0
+              while i < len(st):
+                  tok = struct.unpack_from('>I', st, i)[0]; i += 4
+                  if tok == 1:                      # FDT_BEGIN_NODE
+                      e = st.find(b'\0', i)
+                      nm = st[i:e].decode('ascii', 'replace'); i = (e + 4) & ~3
+                      stack.append(nm)
+                  elif tok == 2:                    # FDT_END_NODE
+                      if stack: stack.pop()
+                  elif tok == 3:                    # FDT_PROP
+                      ln, no = struct.unpack_from('>II', st, i); i += 8
+                      val = st[i:i + ln]; i = (i + ln + 3) & ~3
+                      path = '/'.join(x for x in stack if x)
+                      out.setdefault(path, {})[pname(no)] = val
+                  elif tok == 9:                    # FDT_END
+                      break
+                  elif tok == 4:                    # FDT_NOP
+                      continue
+                  else:
+                      break
+              return out
+
+          d = open('out/u-boot-rockchip.bin', 'rb').read()
+          assert d[:4] == b'RKNS', 'not a binman u-boot-rockchip.bin'
+          FIT = 0x7f8000   # CONFIG_SPL_PAD_TO for evb-rk3588_defconfig
+          assert d[FIT:FIT + 4] == bytes.fromhex('d00dfeed'), 'FIT missing @0x7f8000'
+          print('size=%d  FIT@0x%x  totalsize=%d'
+                % (len(d), FIT, struct.unpack_from('>I', d, FIT + 4)[0]))
+          assert len(d) < 16 * 1024 * 1024, 'bin too large, would overwrite rootfs'
+
+          # Locate the control DTB inside the FIT and unpack its external data.
+          fit = dtb_props(d[FIT:FIT + struct.unpack_from('>I', d, FIT + 4)[0]])
+          fdt = [n for n, v in fit.items()
+                 if n.startswith('images/') and v.get('type', b'').startswith(b'flat_dt')]
+          assert fdt, 'no control DTB in FIT'
+          p = fit[fdt[0]]
+          do = struct.unpack('>I', p['data-offset'])[0]
+          ds = struct.unpack('>I', p['data-size'])[0]
+          EXT = 0xa00      # CONFIG_FIT_EXTERNAL_OFFSET
+          control = dtb_props(d[FIT + EXT + do:FIT + EXT + do + ds])
+          print('control DTB: %s (%d bytes)' % (fdt[0], ds))
+
+          # ---- This is the whole point of the DTS patch ----
+          sd = control.get('mmc@fe2c0000', {})
+          status = sd.get('status', b'(missing)').split(b'\0')[0].decode()
+          print('control DTB mmc@fe2c0000 (SDMMC/TF card) status =', status)
+          assert status == 'okay', 'SDMMC disabled: SPL cannot find the FIT on the TF card'
+          order = control.get('chosen', {}).get('u-boot,spl-boot-order', b'')
+          print('spl-boot-order =', [x.decode() for x in order.split(b'\0') if x])
+          assert b'mmc@fe2c0000' in order, 'SDMMC missing from SPL boot order'
+          print('OK: SDMMC enabled and in SPL boot order; FIT layout valid')
           PY
           sha256sum out/u-boot-rockchip.bin > out/u-boot-rockchip.bin.sha256
           {
             echo "uboot_ref    : $UB_REF"
             echo "defconfig    : $DEFCONFIG"
+            echo "sd_fix       : $SD_FIX"
             echo "DDR bin      : $DDR_NAME"
             echo "BL31         : $BL31_NAME"
             echo "u-boot commit: $(git -C work/u-boot rev-parse --short HEAD)"
             echo "rkbin commit : $(git -C work/rkbin rev-parse --short HEAD)"
             echo ""
-            echo "Linux : dd if=u-boot-rockchip.bin of=/dev/sdX bs=512 seek=64 conv=fsync,notrunc"
+            echo "Linux  : dd if=u-boot-rockchip.bin of=/dev/sdX bs=512 seek=64 conv=fsync,notrunc"
             echo "Windows: see windows/README.md in this repo"
           } > out/build-info.txt
           cat out/build-info.txt
