@@ -1,0 +1,6 @@
+# RK3588 EVB7 LP4 V10 — ophub 风格 uEnv.txt（模板）
+# 01-fix-sd-boot.sh 替换 @FDTFILE@ / @ROOTDEV@ 后写入 /boot/uEnv.txt。
+LINUX=/Image
+INITRD=/uInitrd
+FDT=/dtb/rockchip/@FDTFILE@
+APPEND=root=@ROOTDEV@ rootwait rootfstype=ext4 console=ttyS2,1500000 console=tty1 consoleblank=0 loglevel=1 cma=256M

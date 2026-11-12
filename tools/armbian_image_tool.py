@@ -252,6 +252,18 @@ class Ext4:
 def verify(path, deep=False, quiet=False):
     r = {"image": os.path.abspath(path), "checks": [], "warnings": [], "errors": []}
 
+    def _done(res):
+        """补 summary 并返回。所有 return 点都必须走这里——
+        早退时缺 summary 会让 print_report/main 直接 KeyError 崩溃，
+        而 CI 里那句 `|| true` 会把崩溃吞掉，形成静默漏检。"""
+        res["summary"] = {
+            "total": len(res["checks"]),
+            "passed": sum(1 for c in res["checks"] if c["ok"]),
+            "failed": len(res["errors"]),
+            "warnings": len(res["warnings"]),
+        }
+        return res
+
     def check(name, ok, detail=""):
         r["checks"].append({"name": name, "ok": bool(ok), "detail": detail})
         if not ok:
@@ -301,7 +313,7 @@ def verify(path, deep=False, quiet=False):
     except ValueError as e:
         check("rootfs ext4 可解析", False, str(e))
         rd.close()
-        return r
+        return _done(r)
     check("rootfs ext4 可解析", True, f"blocksize={fs.bs} label={fs.label} uuid={fs.uuid}")
     r["ext4_uuid"] = fs.uuid
 
@@ -311,7 +323,7 @@ def verify(path, deep=False, quiet=False):
     except Exception as e:
         check("/boot 目录可读", False, str(e))
         rd.close()
-        return r
+        return _done(r)
     r["boot_files"] = sorted(entries)
     check("/boot 目录可读", True, f"{len(entries)} 项")
     for f in ("Image", "uInitrd", "dtb", "boot.scr", "armbianEnv.txt", "boot.cmd"):
@@ -363,12 +375,45 @@ def verify(path, deep=False, quiet=False):
             check("fdtfile 指向的 DTB 真实存在", bool(rel) and rel in dtb_names,
                   f"fdtfile='{fdt}'，目录内共 {len(dtb_names)} 个 dtb；"
                   f"可用 evb7 变体: {r['evb7_dtbs']}")
-            check("rootdev 使用 UUID（不依赖 mmcblk 编号）",
-                  vals.get("rootdev", "").startswith("UUID="),
-                  f"rootdev={vals.get('rootdev')}")
-            check("rootdev UUID 与 ext4 文件系统 UUID 一致",
-                  vals.get("rootdev", "").upper() == ("UUID=" + fs.uuid).upper(),
-                  f"ext4={fs.uuid} / armbianEnv={vals.get('rootdev')}")
+            # 2026-11-12 实机结论：Armbian uInitrd 里没有 udev，
+            # /dev/disk/by-partuuid|by-uuid 链接根本不存在，initramfs 会报
+            # "ALERT! PARTUUID=... does not exist"。最终方案改为在 extraargs
+            # 里用 devtmpfs 直接可见的 /dev/mmcblk1p1（最后一个 root= 生效）。
+            extra = vals.get("extraargs", "")
+            roots = [x for x in extra.split() if x.startswith("root=")]
+            check("extraargs 指定 root=/dev/mmcblk1p1（不依赖 udev 链接）",
+                  bool(roots) and roots[-1] == "root=/dev/mmcblk1p1",
+                  f"extraargs={extra!r}")
+            check("extraargs 带 rootdelay=10（SD 控制器 deferred probe ~31s）",
+                  "rootdelay=10" in extra, f"extraargs={extra!r}")
+            check("extraargs 把 console=ttyFIQ0 放到最后（/dev/console 回串口）",
+                  "console=ttyFIQ0" in extra, f"extraargs={extra!r}")
+            check("verbosity=7（loglevel=7，内核日志全开）",
+                  vals.get("verbosity") == "7",
+                  f"verbosity={vals.get('verbosity')}")
+            # boot.scr：legacy uImage 的两个 CRC + 显式 earlycon
+            scr_bytes = assemble("scr", scr_ino) if scr_ino else b""
+            scr_ok = (len(scr_bytes) >= 64 and
+                      struct.unpack_from(">I", scr_bytes, 0)[0] == 0x27051956)
+            check("boot.scr 是合法 legacy uImage", scr_ok,
+                  f"magic={scr_bytes[:4].hex() if scr_bytes else 'empty'}")
+            if scr_ok:
+                import zlib
+                sz = struct.unpack_from(">I", scr_bytes, 12)[0]
+                body = scr_bytes[64:64 + sz]
+                dcrc = struct.unpack_from(">I", scr_bytes, 24)[0]
+                hdr = bytearray(scr_bytes[:64])
+                struct.pack_into(">I", hdr, 4, 0)
+                hcrc = struct.unpack_from(">I", scr_bytes, 4)[0]
+                check("boot.scr ih_dcrc 正确（vendor source 会校验）",
+                      (zlib.crc32(body) & 0xffffffff) == dcrc,
+                      f"stored=0x{dcrc:08x} calc=0x{zlib.crc32(body) & 0xffffffff:08x}")
+                check("boot.scr ih_hcrc 正确",
+                      (zlib.crc32(bytes(hdr)) & 0xffffffff) == hcrc,
+                      f"stored=0x{hcrc:08x}")
+                check("boot.scr 含显式 earlycon=uart8250,mmio32,0xfeb50000",
+                      b"earlycon=uart8250,mmio32,0xfeb50000" in body,
+                      "earlycon 补丁未生效")
             check("串口 console 为 ttyS2,1500000",
                   "ttyS2,1500000" in cmd, "boot.cmd 未设置 RK3588 UART2 控制台")
             check("boot.cmd 以 booti 启动 arm64 内核", "booti " in cmd)
@@ -394,13 +439,7 @@ def verify(path, deep=False, quiet=False):
         warn("深度检查未执行", "使用 --deep 校验 fdtfile / rootdev / console")
 
     rd.close()
-    r["summary"] = {
-        "total": len(r["checks"]),
-        "passed": sum(1 for c in r["checks"] if c["ok"]),
-        "failed": len(r["errors"]),
-        "warnings": len(r["warnings"]),
-    }
-    return r
+    return _done(r)
 
 
 # --------------------------------------------------------------------------

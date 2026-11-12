@@ -1,0 +1,27 @@
+# RK3588 EVB7 LP4 V10 -- final TF-card boot environment (template).
+# Rendered by tools/patch_boot_chain.py env (01-fix-sd-boot.sh step 4):
+#   @FDTFILE@ -> rk3588-evb7-lp4-v10-linux.dtb ; # comment lines are dropped.
+# 02-ophub-integration.sh still renders the same template for its
+# different-files payload; it simply has no @ROOTDEV@ to substitute any more.
+#
+# Verified 2026-11-12: Armbian 26.08.0-trunk noble boots to systemd from
+# /dev/mmcblk1p1 with eMMC Android untouched.  See docs/10 sections 9..16.
+#
+# Why there is NO rootdev= line: Armbian's uInitrd has no udev, so the
+# /dev/disk/by-partuuid (and by-uuid) symlinks never exist.  Debian initramfs
+# resolves PARTUUID=/UUID= through those links and fails with
+#   "ALERT! ... does not exist.  Dropping to a shell!"
+# /dev/mmcblk1p1 is created by devtmpfs and needs no userspace help.
+# boot.scr appends ${extraargs} near the end of bootargs; Linux calls
+# root_dev_setup() for EVERY root=, so this LAST root= overrides the bogus
+# root=PARTUUID=614e0000-0000 coming from the vendor DTB.
+#
+# rootdelay=10: the SD controller finishes deferred probe at ~31 s, so give
+# initramfs enough time to see the device.
+# console=ttyFIQ0: bootargs already contains "console=ttyFIQ0 console=tty1";
+# the LAST console= becomes /dev/console.  Repeating ttyFIQ0 here keeps
+# initramfs / systemd / getty output on the serial port too (HDMI stays up).
+verbosity=7
+extraargs=root=/dev/mmcblk1p1 rootdelay=10 console=ttyFIQ0 cma=256M
+overlay_prefix=rockchip-rk3588
+fdtfile=rockchip/@FDTFILE@
