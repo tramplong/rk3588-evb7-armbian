@@ -1,0 +1,136 @@
+# =============================================================================
+# 云端一键重建 RK3588 EVB7 LP4 V10 的 TF 卡 Armbian 固件
+#
+# 参照 ophub/amlogic-s9xxx-armbian 的 GitHub Actions 出包方式，但内核沿用
+# 与本板绑定的 vendor 6.1.115 BSP（原因见 docs/01-硬件与启动链分析.md §3）。
+#
+# 2026-11-12 起 01 脚本内置全部实机验证过的启动链补丁（见
+# tools/patch_boot_chain.py 与 docs/10 §9..§16），产出的 .img 直接烧卡即可
+# 启动到 systemd，不再需要在 Windows 上手动跑任何写卡补丁脚本：
+#   * vendor FIT 的 3 处 OP-TEE 中止点补丁（bootdelay 保持 0）
+#   * boot.scr 显式 earlycon + ih_dcrc/ih_hcrc 重算
+#   * 板级 DTB 两个 PCIe 节点 status okay->fail（避开 rk-pcie 死锁）
+#   * armbianEnv.txt 用 root=/dev/mmcblk1p1 rootdelay=10 console=ttyFIQ0
+#
+# 使用方法：
+#  1. 把整个 rk3588-evb7-armbian/ 目录推到你自己的 GitHub 仓库（含 assets/ 二进制）
+#  2. 把本文件放到 .github/workflows/build-rk3588-evb7.yml
+#  3. 打开 Actions → 选本 workflow → Run workflow，填入 base_image_url
+#     （基础 Armbian 镜像的直链；也可先上传到 Release 再填 release 直链）
+#  4. 构建结束后从 Artifacts 下载 .img.xz
+#
+# ⚠ GitHub 托管 runner 磁盘约 14–25 GB 可用；镜像解压后 10.7 GiB，
+#   本 workflow 会先清理预装 SDK 腾空间，并让 01 脚本以 mv 而非 cp 输出。
+# =============================================================================
+name: Build RK3588-EVB7 SD-boot Armbian
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_image_url:
+        description: '基础 Armbian 镜像直链 (.img.xz)'
+        required: true
+        type: string
+      image_name:
+        description: '输出镜像名（不含扩展名）'
+        required: false
+        default: 'Armbian_rk3588-evb7_sd-boot'
+        type: string
+      compress:
+        description: '额外压缩为 .img.xz'
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches: [ main ]
+    paths:
+      - 'scripts/01-fix-sd-boot.sh'
+      - 'board/bootfs/**'
+      - 'tools/patch_boot_chain.py'
+      - 'tools/armbian_image_tool.py'
+      - 'assets/bootloader/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout kit
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "=== before ==="; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo apt-get clean || true
+          docker system prune -af || true
+          echo "=== after ==="; df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            xz-utils util-linux e2fsprogs parted u-boot-tools \
+            python3 rsync coreutils dosfstools
+          python3 --version
+
+      - name: Boot-chain patch tool selftest
+        run: |
+          python3 tools/patch_boot_chain.py selftest
+          python3 -m py_compile tools/patch_boot_chain.py tools/armbian_image_tool.py
+          bash -n scripts/01-fix-sd-boot.sh
+
+      - name: Download base Armbian image
+        if: ${{ inputs.base_image_url != '' }}
+        shell: bash
+        env:
+          BASE_URL: ${{ inputs.base_image_url }}
+        run: |
+          mkdir -p input
+          curl -fL --retry 3 --retry-delay 10 -o input/base.img.xz "$BASE_URL"
+          ls -lh input/
+          test -s input/base.img.xz
+
+      - name: Verify input image structure (offline, no mount)
+        run: |
+          python3 tools/armbian_image_tool.py verify input/base.img.xz --quiet || true
+
+      - name: Fix SD boot and assemble firmware
+        # A push/PR run has no base_image_url: selftests above still run, but
+        # there is no 10.7 GiB base image to assemble.  Skip instead of
+        # failing on a missing input/base.img.xz.
+        if: ${{ inputs.base_image_url != '' }}
+        shell: bash
+        run: |
+          NAME="${{ inputs.image_name || 'Armbian_rk3588-evb7_sd-boot' }}"
+          ARGS="input/base.img.xz output/${NAME}.img"
+          if [ "${{ inputs.compress || 'true' }}" = "true" ]; then ARGS="$ARGS --compress"; fi
+          # 用 bash 显式调用，不依赖 git 是否保留了 +x 执行位
+          # （网页上传 / 部分 API 上传会把文件模式固定成 100644）
+          sudo -E bash -c "cd '$GITHUB_WORKSPACE' && bash ./scripts/01-fix-sd-boot.sh $ARGS"
+          ls -lh output/
+
+      - name: Selftest-only run notice
+        if: ${{ inputs.base_image_url == '' }}
+        run: |
+          echo "push/schedule run: boot-chain selftest + syntax checks only."
+          echo "To build an image, use workflow_dispatch and supply base_image_url."
+
+      - name: Show verification report
+        if: always()
+        run: |
+          cat output/*_verify.txt || true
+          cat output/*.sha256 || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rk3588-evb7-sd-boot-armbian
+          path: |
+            output/*.img.xz
+            output/*.img
+            output/*_verify.txt
+            output/*.sha256
+          if-no-files-found: warn
+          retention-days: 14
