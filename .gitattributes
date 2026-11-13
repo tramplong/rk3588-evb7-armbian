@@ -1,0 +1,19 @@
+# Keep shell/python/yaml line endings as LF so the CI runner (Linux) can
+# execute scripts directly.  cmd/ps1 stay CRLF for the Windows console.
+* text=auto
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary assets — never convert.
+*.img binary
+*.itb binary
+*.bin binary
+*.dtb binary
+*.png binary
+*.jpg binary
+*.xz  binary
