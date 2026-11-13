@@ -393,45 +393,80 @@ def cmd_scr(args):
 
 
 # -------------------------------------------------------------------------- DTB
+def fdt_status_available(value):
+    """True when a DTB `status` property means "device available".
+
+    Linux __of_device_is_available() (drivers/of/base.c): "okay" / "ok" are
+    available, anything else is off.  (A *missing* property is also available,
+    but that case is handled separately by dtb_apply / the deep verifier.)
+    """
+    s = bytes(value).split(b"\x00")[0].strip()
+    return s in (b"okay", b"ok")
+
+
+def fdt_disabled_value(value):
+    """Equal-length, NUL-terminated replacement that is NOT "okay"/"ok".
+
+    Never grows the property, so FDT offsets / totalsize never move.  Works
+    for short "ok\\0" (3 B), "okay\\0" (5 B) and any longer status string.
+    """
+    ln = len(value)
+    if ln == 0:
+        return value
+    raw = bytearray(DTB_STATUS_FAIL[:ln].ljust(ln, b"\x00"))
+    raw[-1] = 0
+    return bytes(raw)
+
+
 def dtb_apply(data, verbose=True):
-    """Return (patched_bytes, report).  Idempotent."""
+    """Return (patched_bytes, report).  Idempotent and variant-tolerant.
+
+    DTB variants are NOT identical: rk3588-evb7-lp4-v10-rk1608-ipc-8x-linux.dtb
+    carries 9-byte "disabled\\0" on 6 of the 11 nodes, others use short "ok\\0",
+    and some omit a node entirely.  All of those are legitimate "already off /
+    not present" cases and must not abort the CI build.  Only properties that
+    are explicitly available are rewritten.
+    """
     f = Fdt(data)
     f.walk()
-    changed = 0
     states = {}
     for node in DTB_DISABLE_NODES:
         off, ln = f.prop(node, "status")
         if off is None:
-            die("missing %s/status in DTB" % node)
-        if ln != len(DTB_STATUS_OKAY):
-            die("%s/status length %d != %d" % (node, ln, len(DTB_STATUS_OKAY)))
+            # Node absent, or present without a status property.  The latter
+            # is technically "available" in Linux, but adding a property would
+            # move the whole FDT; verify --deep reports it as still enabled
+            # instead of failing the patch step here.
+            states[node] = "absent (skipped)"
+            if verbose:
+                print("  DTB  %-38s no status property -> skipped" % node)
+            continue
         cur = bytes(f.buf[off:off + ln])
-        if cur == DTB_STATUS_FAIL:
-            states[node] = "fail (already)"
+        if not fdt_status_available(cur):
+            tag = cur.split(b"\x00")[0].decode("ascii", "replace") or "empty"
+            states[node] = "%s (already disabled)" % tag
             if verbose:
-                print("  DTB  %-22s status already 'fail'" % node)
-        elif cur == DTB_STATUS_OKAY:
-            f.put_bytes(node, "status", DTB_STATUS_FAIL)
-            states[node] = "okay -> fail"
-            changed += 1
-            if verbose:
-                print("  DTB  %-22s status 'okay' -> 'fail'" % node)
-        else:
-            die("%s/status unexpected value %r" % (node, cur))
+                print("  DTB  %-38s status '%s' already disabled" % (node, tag))
+            continue
+        tag = cur.split(b"\x00")[0].decode("ascii", "replace")
+        f.put_bytes(node, "status", fdt_disabled_value(cur))
+        states[node] = "%s -> fail" % tag
+        if verbose:
+            print("  DTB  %-38s status '%s' -> 'fail'" % (node, tag))
+
     out = bytes(f.buf)
-    # self-check: structure must stay byte-identical except the status values
     c = Fdt(out)
     c.walk()
     if c.total != f.total or len(out) != len(data):
         die("DTB structure changed")
     for node in DTB_DISABLE_NODES:
         off, ln = c.prop(node, "status")
-        if bytes(c.buf[off:off + ln]) != DTB_STATUS_FAIL:
+        if off is not None and fdt_status_available(c.buf[off:off + ln]):
             die("DTB status self-check failed for %s" % node)
     diff = sum(1 for a, b in zip(out, data) if a != b)
     if verbose:
-        print("  DTB  totalsize=%d  bytes differing: %d  all %d statuses OK"
-              % (f.total, diff, len(DTB_DISABLE_NODES)))
+        print("  DTB  totalsize=%d  bytes differing: %d  enabled nodes: 0"
+              % (f.total, diff))
     return out, {"totalsize": f.total, "states": states, "bytes_changed": diff}
 
 
@@ -556,39 +591,49 @@ def cmd_selftest(args):
         return (struct.pack(">I", FDT_BEGIN_NODE) + raw
                 + b"\0" * ((-len(raw)) & 3))
 
-    # build the tree: DTB_DISABLE_NODES contains nested paths such as
-    # "/i2c@fec90000/es8388@11", so the synthetic FDT must nest too.
-    tree = {}
-    for p in DTB_DISABLE_NODES:
-        parts = [x for x in p.split("/") if x]
-        cur = tree
-        for i, part in enumerate(parts):
-            node = cur.setdefault(part, {"children": {}, "leaf": False})
-            if i == len(parts) - 1:
-                node["leaf"] = True
-            cur = node["children"]
+    def make_fdt(spec):
+        """Build an FDT from {node_path: status_bytes_or_None}.
 
-    names = b"status\0"
+        DTB_DISABLE_NODES contains nested paths such as
+        "/i2c@fec90000/es8388@11", so intermediate nodes are emitted too.
+        -1 marks an intermediate node, None means "node without status".
+        """
+        tree = {}
+        for p, val in spec.items():
+            parts = [x for x in p.split("/") if x]
+            cur = tree
+            for i, part in enumerate(parts):
+                node = cur.setdefault(part, {"children": {}, "status": -1})
+                if i == len(parts) - 1:
+                    node["status"] = val
+                cur = node["children"]
 
-    def emit(children):
-        out = bytearray()
-        for name in sorted(children):
-            node = children[name]
-            out += begin_node(name)
-            if node["leaf"]:
-                out += mkprop(0, b"okay\0")
-            out += emit(node["children"])
-            out += struct.pack(">I", FDT_END_NODE)
-        return out
+        names = b"status\0"
 
-    struct_ = emit(tree) + struct.pack(">I", FDT_END)
-    dtb = bytearray()
-    dtb += struct.pack(">10I", FDT_MAGIC, 0, 40, 0, 0, 17, 16, 0, len(names), 0)
-    off_strings = 40 + len(struct_)
-    dtb += struct_ + names
-    struct.pack_into(">10I", dtb, 0, FDT_MAGIC, len(dtb), 40, off_strings,
-                     0, 17, 16, 0, len(names), len(struct_))
-    patched, drep = dtb_apply(bytes(dtb), verbose=False)
+        def emit(children):
+            out = bytearray()
+            for name in sorted(children):
+                node = children[name]
+                out += begin_node(name)
+                st = node["status"]
+                if st != -1 and st is not None:
+                    out += mkprop(0, st)
+                out += emit(node["children"])
+                out += struct.pack(">I", FDT_END_NODE)
+            return out
+
+        struct_ = emit(tree) + struct.pack(">I", FDT_END)
+        dtb = bytearray()
+        dtb += struct.pack(">10I", FDT_MAGIC, 0, 40, 0, 0, 17, 16, 0, len(names), 0)
+        off_strings = 40 + len(struct_)
+        dtb += struct_ + names
+        struct.pack_into(">10I", dtb, 0, FDT_MAGIC, len(dtb), 40, off_strings,
+                         0, 17, 16, 0, len(names), len(struct_))
+        return bytes(dtb)
+
+    # --- case 1: every node "okay" (the primary linux DTB) ----------------
+    dtb = make_fdt({p: b"okay\0" for p in DTB_DISABLE_NODES})
+    patched, drep = dtb_apply(dtb, verbose=False)
     ck("dtb_apply keeps FDT length", len(patched) == len(dtb))
     ck("dtb_apply sets status to fail", b"fail\0" in patched)
     ck("dtb_apply changes exactly %d bytes" % (4 * len(DTB_DISABLE_NODES)),
@@ -596,6 +641,41 @@ def cmd_selftest(args):
     ck("dtb_apply is idempotent", dtb_apply(patched, verbose=False)[0] == patched)
     ck("DTB_DISABLE_NODES covers 11 nodes (2 PCIe + 9 peripherals)",
        len(DTB_DISABLE_NODES) == 11 and len(set(DTB_DISABLE_NODES)) == 11)
+
+    # --- case 2: a real DTB variant mixes 9-byte "disabled", short "ok", --
+    # --- a node with no status property, and a node absent altogether. ----
+    # Regression for the 2026-11-13 CI failure on
+    # rk3588-evb7-lp4-v10-rk1608-ipc-8x-linux.dtb ("status length 9 != 5").
+    nodes = list(DTB_DISABLE_NODES)
+    mixed = {}
+    for i, p in enumerate(nodes[1:], start=1):
+        if i % 4 == 1:
+            mixed[p] = b"disabled\0"      # 9 B, already off
+        elif i % 4 == 2:
+            mixed[p] = b"ok\0"            # 3 B short form
+        elif i % 4 == 3:
+            mixed[p] = b"okay\0"          # 5 B normal form
+        else:
+            mixed[p] = None               # node exists, no status property
+    mix = make_fdt(mixed)                 # nodes[0] deliberately absent
+    mix_out, mrep = dtb_apply(mix, verbose=False)
+    ck("mixed variant: 9-byte disabled tolerated",
+       any("already disabled" in v for v in mrep["states"].values()))
+    ck("mixed variant: absent node skipped",
+       "absent" in mrep["states"].get(nodes[0], ""))
+    ck("mixed variant: FDT length unchanged", len(mix_out) == len(mix))
+    g = Fdt(mix_out)
+    g.walk()
+    leftover = []
+    for n in nodes:
+        o, l = g.prop(n, "status")
+        if o is not None and fdt_status_available(g.buf[o:o + l]):
+            leftover.append(n)
+    ck("mixed variant: no node left available", not leftover)
+    ck("mixed variant: short ok stays within 3 bytes",
+       fdt_disabled_value(b"ok\0") == b"fa\0")
+    ck("mixed variant: idempotent",
+       dtb_apply(mix_out, verbose=False)[0] == mix_out)
 
     bad = 0
     for name, ok in checks:

@@ -16,8 +16,9 @@
 #        console=ttyFIQ0 + verbosity=7。uInitrd 无 udev，PARTUUID 必然解析失败。
 #     6. boot.scr：83 字节等长替换，把条件 earlycon 改成显式
 #        earlycon=uart8250,mmio32,0xfeb50000,1500000，并重算 ih_dcrc/ih_hcrc。
-#     7. 板级 DTB：/pcie@fe150000 /pcie@fe170000 的 status okay->fail（8 字节），
-#        绕开 rk-pcie 在 do_initcalls() 里的 mutex 死锁。
+#     7. 板级 DTB：11 个节点 status 改为非启用值（2 个 PCIe 控制器绕开
+#        do_initcalls() 的 mutex 死锁 + 9 个板上没焊的外设）。等长替换，
+#        FDT 结构不动；各变体里已 disabled 或缺失的节点自动跳过。
 #     8. sector 16384（0x800000）写 vendor FIT：3 处 OP-TEE 中止点补丁，
 #        bootdelay 保持 0，重算 /images/uboot sha256，补零到 2 MiB。
 #        sector 64 仍写 idbloader.img（BootROM 实际只从 eMMC 取 SPL，
@@ -127,14 +128,18 @@ $PBC scr "$SCR" || die "boot.scr 补丁失败"
 # 4.3 板级 DTB：禁用 11 个节点——2 个会死锁的 PCIe 控制器（rk-pcie 在
 #     do_initcalls() 里持 mutex 不放，RCU stall 12 轮）+ 9 个板上根本没焊的
 #     外设（Goodix 触摸屏 / imx415 摄像头 / hym8563 RTC / es8388 音频 codec /
-#     SDIO / HDMI RX / 两个 DP）。全部是等长 5 字节替换 okay\0 -> fail\0，
-#     FDT 结构一个字节都不动。HDMI 输出、TF 卡、eMMC、以太网、USB 全部保留。
-#     覆盖 /boot 下所有 dtb* 目录里的 evb7 linux 变体，保证无论 fdtfile
-#     指向哪个都干净。清单见 tools/patch_boot_chain.py 的 DTB_DISABLE_NODES。
+#     SDIO / HDMI RX / 两个 DP）。全部是等长替换（okay\0 / ok\0 -> 非启用值），
+#     FDT 结构一个字节都不动。注意各变体并不一致：rk1608-ipc-8x 变体里 6 个
+#     节点本来就是 9 字节的 disabled\0；补丁工具按 Linux status 语义判定，
+#     已禁用 / 节点缺失的一律跳过，不能因为长度不等于 5 就中止出包。
+#     HDMI 输出、TF 卡、eMMC、以太网、USB 全部保留。
+#     覆盖 /boot 下所有 dtb* 目录里的 evb7 linux 变体（含 -linux-ipc.dtb），
+#     保证无论 fdtfile 指向哪个都干净。清单见 tools/patch_boot_chain.py
+#     的 DTB_DISABLE_NODES。
 DTB_PATCHED=0
 for d in "${MNT}"/boot/dtb*/rockchip; do
     [[ -d "$d" ]] || continue
-    for f in "$d"/rk3588-evb7*-linux.dtb; do
+    for f in "$d"/rk3588-evb7*linux*.dtb; do
         [[ -f "$f" ]] || continue
         $PBC dtb "$f" || die "DTB 补丁失败: $f"
         DTB_PATCHED=$((DTB_PATCHED + 1))

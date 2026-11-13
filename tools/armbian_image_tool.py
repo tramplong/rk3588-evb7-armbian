@@ -461,7 +461,8 @@ def verify(path, deep=False, quiet=False):
                                 for o, _ in info["blocks"])[:info["size"]]
 
             def fdt_status(buf):
-                """返回 {node_path: status}；非法 FDT 返回 None。"""
+                """返回 {node_path: status}；节点无 status 记 ''（Linux 视作启用）；
+                不在 dict 里 = 该变体根本没有这个节点；非法 FDT 返回 None。"""
                 if len(buf) < 40 or buf[:4] != bytes.fromhex("d00dfeed"):
                     return None
                 off_struct = struct.unpack_from(">I", buf, 8)[0]
@@ -476,6 +477,7 @@ def verify(path, deep=False, quiet=False):
                         end = buf.index(b"\0", p)
                         stack.append(buf[p:end].decode("latin1"))
                         p = (end + 1 + 3) & ~3
+                        out.setdefault("/" + "/".join(x for x in stack if x), "")
                     elif tok == 2:                     # END_NODE
                         if stack:
                             stack.pop()
@@ -512,14 +514,19 @@ def verify(path, deep=False, quiet=False):
                     warn("DTB 解析", f"{nm}: 不是合法 FDT")
                     continue
                 good += 1
+                # 变体差异：节点可能整体不存在（安全），或已写成
+                # "disabled"/"fail"（安全）。只有明确 "okay"/"ok" 或
+                # 节点存在但缺 status 属性（Linux 默认启用）才算漏禁。
                 still = [n for n in DISABLED_NODES
-                         if st.get(n) not in ("fail", "disabled")]
+                         if n in st and st[n] in ("", "okay", "ok")]
+                absent = sum(1 for n in DISABLED_NODES if n not in st)
                 if still:
                     bad.extend(f"{nm}:{n}" for n in still)
                     detail.append(f"{nm}: 仍启用 {len(still)}/{len(DISABLED_NODES)}"
                                   f" ({', '.join(x.rsplit('/', 1)[-1] for x in still)})")
                 else:
-                    detail.append(f"{nm}: 11/11 已禁用")
+                    note = f"，{absent} 个节点此变体不含" if absent else ""
+                    detail.append(f"{nm}: 11/11 已禁用{note}")
             check("DTB 已禁用 11 个不存在的外设/PCIe 节点",
                   bool(good) and not bad,
                   "；".join(detail) if good else "未找到 evb7 DTB 文件")
