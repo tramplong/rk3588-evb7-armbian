@@ -124,8 +124,24 @@ SCR="${MNT}/boot/boot.scr"
 [[ -f "$SCR" ]] || die "缺少 /boot/boot.scr"
 $PBC scr "$SCR" || die "boot.scr 补丁失败"
 
-# 4.3 板级 DTB：把两个会死锁的 PCIe 控制器关掉（等长 8 字节）。
-$PBC dtb "${DTBDIR}/${FDT}" || die "DTB 补丁失败"
+# 4.3 板级 DTB：禁用 11 个节点——2 个会死锁的 PCIe 控制器（rk-pcie 在
+#     do_initcalls() 里持 mutex 不放，RCU stall 12 轮）+ 9 个板上根本没焊的
+#     外设（Goodix 触摸屏 / imx415 摄像头 / hym8563 RTC / es8388 音频 codec /
+#     SDIO / HDMI RX / 两个 DP）。全部是等长 5 字节替换 okay\0 -> fail\0，
+#     FDT 结构一个字节都不动。HDMI 输出、TF 卡、eMMC、以太网、USB 全部保留。
+#     覆盖 /boot 下所有 dtb* 目录里的 evb7 linux 变体，保证无论 fdtfile
+#     指向哪个都干净。清单见 tools/patch_boot_chain.py 的 DTB_DISABLE_NODES。
+DTB_PATCHED=0
+for d in "${MNT}"/boot/dtb*/rockchip; do
+    [[ -d "$d" ]] || continue
+    for f in "$d"/rk3588-evb7*-linux.dtb; do
+        [[ -f "$f" ]] || continue
+        $PBC dtb "$f" || die "DTB 补丁失败: $f"
+        DTB_PATCHED=$((DTB_PATCHED + 1))
+    done
+done
+[[ $DTB_PATCHED -gt 0 ]] || die "没找到任何 evb7 linux DTB 可补丁"
+echo "  已补丁 DTB 副本数: $DTB_PATCHED"
 
 # extlinux / uEnv 仍用 @ROOTDEV@=UUID=<ext4 s_uuid> 作兜底启动路径
 render() { sed -e "s|@FDTFILE@|${FDT}|g" -e "s|@ROOTDEV@|UUID=${FS_UUID}|g" "$1"; }

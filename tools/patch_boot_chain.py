@@ -22,8 +22,10 @@ Subcommands
        recompute the legacy uImage ih_dcrc / ih_hcrc.
 
   dtb  <board.dtb> [--check]
-       Set /pcie@fe150000 and /pcie@fe170000 status "okay" -> "fail" (5 -> 5
-       bytes each).  Their rk-pcie driver deadlocks inside do_initcalls().
+       Set DTB_DISABLE_NODES status "okay" -> "fail" (5 -> 5 bytes each):
+       the two PCIe controllers that deadlock the kernel, plus 9 peripherals
+       that are not fitted on this EVB7 board (touch, camera, RTC, audio codec,
+       SDIO, HDMI RX, DisplayPort).
 
   env  <template> <out> --fdtfile NAME
        Render board/bootfs/armbianEnv.txt (drops # comments, substitutes
@@ -80,7 +82,50 @@ SCR_NEW = (b'setenv consoleargs "earlycon=uart8250,mmio32,0xfeb50000,1500000 '
            b'${consoleargs}"')
 SCR_NEW += b" " * (len(SCR_OLD) - len(SCR_NEW))
 
-DTB_PCIE_NODES = ("/pcie@fe150000", "/pcie@fe170000")
+#  DTB_DISABLE_NODES — nodes whose `status` is flipped "okay" -> "fail" (5 -> 5
+#  bytes each, same length, so the FDT structure never moves).  Two classes:
+#
+#   * /pcie@fe150000, /pcie@fe170000 — their rk-pcie driver deadlocks inside
+#     do_initcalls() (dw_pcie_read holds the mutex, RCU stall, 12 rounds).
+#     Proven on hardware 2026-11-11.
+#
+#   * peripherals that are simply NOT populated on this EVB7 board.  Their
+#     drivers either probe-fail or, worse, retry on a dead I2C bus for seconds
+#     (gt1x).  Taken from the serial log of the successful boot
+#     (MobaXterm_COM3USB-SERIALCH340COM3_20261112_011704.txt):
+#       gt1x        -> "Reset guitar failed!" x N + rk3x-i2c timeout, ~2 s lost
+#       imx415      -> "Unexpected sensor id(000000), ret(-5)"
+#       hym8563     -> "probe of 6-0051 failed with error -110"
+#       es8388      -> ASoC register read -6, ~30 lines of spam
+#       mmc@fe2d0000-> "No normal/idle pinctrl state" x8 (SDIO, no card)
+#       hdmirx      -> HDMI RX not fitted (HDMI TX stays enabled!)
+#       dp@fde5/6   -> DisplayPort not fitted (HDMI TX stays enabled!)
+#
+#  The three I2C controllers below each hold exactly ONE child device (the one
+#  we want gone), so disabling the controller is equivalent to disabling that
+#  device and cannot take anything else down with it.  Verified by walking the
+#  FDT: /i2c@fead0000 -> only gt1x@14; /i2c@feab0000 -> only imx415@1a;
+#  /i2c@fec80000 -> only hym8563@51.
+#
+#  NEVER touch: /mmc@fe2c0000 (TF card = mmcblk1, our boot disk),
+#  /mmc@fe2e0000 (eMMC = mmcblk0, the Android install), /hdmi@fde80000 /
+#  /hdmi@fdea0000 / hdmiphy (HDMI output is a supported login path),
+#  /ethernet@fe1c0000 (ssh), USB (keyboard login), /vop@fdd90000 (HDMI needs it).
+DTB_DISABLE_NODES = (
+    # --- class 1: PCIe controllers that deadlock the kernel (proven) ---
+    "/pcie@fe150000",
+    "/pcie@fe170000",
+    # --- class 2: not fitted on this board ---
+    "/i2c@fead0000",                 # -> gt1x@14   Goodix touch
+    "/i2c@feab0000",                 # -> imx415@1a camera
+    "/i2c@fec80000",                 # -> hym8563@51 RTC
+    "/i2c@fec90000/es8388@11",       # es8388/es8328 audio codec
+    "/es8388-sound",                 # its sound card
+    "/mmc@fe2d0000",                 # SDIO (Wi-Fi), no card
+    "/hdmirx-controller@fdee0000",   # HDMI RX (input), not fitted
+    "/dp@fde50000",                  # DisplayPort 0, not fitted
+    "/dp@fde60000",                  # DisplayPort 1, not fitted
+)
 DTB_STATUS_OKAY = b"okay\x00"
 DTB_STATUS_FAIL = b"fail\x00"
 
@@ -354,7 +399,7 @@ def dtb_apply(data, verbose=True):
     f.walk()
     changed = 0
     states = {}
-    for node in DTB_PCIE_NODES:
+    for node in DTB_DISABLE_NODES:
         off, ln = f.prop(node, "status")
         if off is None:
             die("missing %s/status in DTB" % node)
@@ -379,14 +424,14 @@ def dtb_apply(data, verbose=True):
     c.walk()
     if c.total != f.total or len(out) != len(data):
         die("DTB structure changed")
-    for node in DTB_PCIE_NODES:
+    for node in DTB_DISABLE_NODES:
         off, ln = c.prop(node, "status")
         if bytes(c.buf[off:off + ln]) != DTB_STATUS_FAIL:
             die("DTB status self-check failed for %s" % node)
     diff = sum(1 for a, b in zip(out, data) if a != b)
     if verbose:
-        print("  DTB  totalsize=%d  bytes differing: %d  all PCIe statuses OK"
-              % (f.total, diff))
+        print("  DTB  totalsize=%d  bytes differing: %d  all %d statuses OK"
+              % (f.total, diff, len(DTB_DISABLE_NODES)))
     return out, {"totalsize": f.total, "states": states, "bytes_changed": diff}
 
 
@@ -501,7 +546,7 @@ def cmd_selftest(args):
     out2, rep2 = scr_apply(out, verbose=False)
     ck("scr_apply is idempotent", out2 == out and rep2["state"] == "already patched")
 
-    # synthetic FDT with one pcie node
+    # synthetic FDT reproducing the real node topology (flat + nested paths)
     def mkprop(nameoff, value):
         return struct.pack(">III", FDT_PROP, len(value), nameoff) + value + \
                b"\0" * ((-len(value)) & 3)
@@ -511,15 +556,34 @@ def cmd_selftest(args):
         return (struct.pack(">I", FDT_BEGIN_NODE) + raw
                 + b"\0" * ((-len(raw)) & 3))
 
+    # build the tree: DTB_DISABLE_NODES contains nested paths such as
+    # "/i2c@fec90000/es8388@11", so the synthetic FDT must nest too.
+    tree = {}
+    for p in DTB_DISABLE_NODES:
+        parts = [x for x in p.split("/") if x]
+        cur = tree
+        for i, part in enumerate(parts):
+            node = cur.setdefault(part, {"children": {}, "leaf": False})
+            if i == len(parts) - 1:
+                node["leaf"] = True
+            cur = node["children"]
+
     names = b"status\0"
+
+    def emit(children):
+        out = bytearray()
+        for name in sorted(children):
+            node = children[name]
+            out += begin_node(name)
+            if node["leaf"]:
+                out += mkprop(0, b"okay\0")
+            out += emit(node["children"])
+            out += struct.pack(">I", FDT_END_NODE)
+        return out
+
+    struct_ = emit(tree) + struct.pack(">I", FDT_END)
     dtb = bytearray()
     dtb += struct.pack(">10I", FDT_MAGIC, 0, 40, 0, 0, 17, 16, 0, len(names), 0)
-    struct_ = bytearray()
-    for node in ("pcie@fe150000", "pcie@fe170000"):
-        struct_ += begin_node(node)
-        struct_ += mkprop(0, b"okay\0")
-        struct_ += struct.pack(">I", FDT_END_NODE)
-    struct_ += struct.pack(">I", FDT_END)
     off_strings = 40 + len(struct_)
     dtb += struct_ + names
     struct.pack_into(">10I", dtb, 0, FDT_MAGIC, len(dtb), 40, off_strings,
@@ -527,8 +591,11 @@ def cmd_selftest(args):
     patched, drep = dtb_apply(bytes(dtb), verbose=False)
     ck("dtb_apply keeps FDT length", len(patched) == len(dtb))
     ck("dtb_apply sets status to fail", b"fail\0" in patched)
-    ck("dtb_apply changes exactly 8 bytes", drep["bytes_changed"] == 8)
+    ck("dtb_apply changes exactly %d bytes" % (4 * len(DTB_DISABLE_NODES)),
+       drep["bytes_changed"] == 4 * len(DTB_DISABLE_NODES))
     ck("dtb_apply is idempotent", dtb_apply(patched, verbose=False)[0] == patched)
+    ck("DTB_DISABLE_NODES covers 11 nodes (2 PCIe + 9 peripherals)",
+       len(DTB_DISABLE_NODES) == 11 and len(set(DTB_DISABLE_NODES)) == 11)
 
     bad = 0
     for name, ok in checks:

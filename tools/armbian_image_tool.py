@@ -347,6 +347,20 @@ def verify(path, deep=False, quiet=False):
     env_ino = entries.get("armbianEnv.txt")
     cmd_ino = entries.get("boot.cmd")
     scr_ino = entries.get("boot.scr")
+    # DTB 文件在 /boot/dtb-*/rockchip/ 下；把所有 evb7 linux 变体都列出来，
+    # deep 模式一并读入，用来核对 11 个"不存在的外设"是否已被禁用。
+    dtb_files = []           # [(name, inode)]
+    dtb_rk_ino = None
+    for d in dtb_dirs:
+        try:
+            rk = fs.child(fs.child(bootino, d), "rockchip")
+            dtb_rk_ino = rk
+            for ino, nm in fs.listdir(rk):
+                if nm.startswith("rk3588-evb7") and nm.endswith("-linux.dtb"):
+                    dtb_files.append((nm, ino))
+            break
+        except Exception:
+            continue
     r["deep"] = deep
     if deep:
         ranges = []
@@ -356,6 +370,11 @@ def verify(path, deep=False, quiet=False):
             info = fs.file_info(ino)
             for off, size in info["blocks"]:
                 ranges.append((f"{label}:{off}", off, min(size, 65536)))
+        # DTB 要整份读（status 属性散布在全文件），不能截断到 64 KiB
+        for nm, ino in dtb_files:
+            info = fs.file_info(ino)
+            for off, size in info["blocks"]:
+                ranges.append((f"dtb:{nm}:{off}", off, size))
         if ranges:
             got = rd.stream_ranges(ranges)
             def assemble(label, ino):
@@ -423,6 +442,87 @@ def verify(path, deep=False, quiet=False):
             check("fdtfile 使用 Linux 版 DTB（非 Android 版）",
                   "-linux.dtb" in fdt,
                   f"fdtfile={fdt}，Android 版 DTB 含 Android bootargs")
+            # ---- DTB: 11 个"板上不存在的外设/PCIe"节点必须已禁用 ----
+            # 与 tools/patch_boot_chain.py 的 DTB_DISABLE_NODES 保持一致。
+            # 取自实机串口日志：gt1x 触摸屏反复 I2C timeout 重试、imx415
+            # "Unexpected sensor id"、hym8563 probe -110、es8328 刷屏、
+            # SDIO 无卡刷 pinctrl 警告、HDMI RX/DP 未焊。HDMI 输出保留。
+            DISABLED_NODES = (
+                "/pcie@fe150000", "/pcie@fe170000",
+                "/i2c@fead0000", "/i2c@feab0000", "/i2c@fec80000",
+                "/i2c@fec90000/es8388@11", "/es8388-sound",
+                "/mmc@fe2d0000", "/hdmirx-controller@fdee0000",
+                "/dp@fde50000", "/dp@fde60000",
+            )
+
+            def assemble_dtb(nm, ino):
+                info = fs.file_info(ino)
+                return b"".join(got.get(f"dtb:{nm}:{o}", b"")
+                                for o, _ in info["blocks"])[:info["size"]]
+
+            def fdt_status(buf):
+                """返回 {node_path: status}；非法 FDT 返回 None。"""
+                if len(buf) < 40 or buf[:4] != bytes.fromhex("d00dfeed"):
+                    return None
+                off_struct = struct.unpack_from(">I", buf, 8)[0]
+                off_strings = struct.unpack_from(">I", buf, 12)[0]
+                size_strings = struct.unpack_from(">I", buf, 32)[0]
+                strings = buf[off_strings:off_strings + size_strings]
+                out, p, stack = {}, off_struct, []
+                while p + 4 <= len(buf):
+                    tok = struct.unpack_from(">I", buf, p)[0]
+                    p += 4
+                    if tok == 1:                       # BEGIN_NODE
+                        end = buf.index(b"\0", p)
+                        stack.append(buf[p:end].decode("latin1"))
+                        p = (end + 1 + 3) & ~3
+                    elif tok == 2:                     # END_NODE
+                        if stack:
+                            stack.pop()
+                    elif tok == 3:                     # PROP
+                        if p + 8 > len(buf):
+                            break
+                        ln, nameoff = struct.unpack_from(">II", buf, p)
+                        p += 8
+                        try:
+                            end = strings.index(b"\0", nameoff)
+                        except ValueError:
+                            break
+                        name = strings[nameoff:end].decode("latin1")
+                        if name == "status":
+                            path = "/" + "/".join(x for x in stack if x)
+                            out[path] = buf[p:p + ln].split(b"\0")[0].decode("ascii", "replace")
+                        p = (p + ln + 3) & ~3
+                    elif tok == 4:                     # NOP
+                        continue
+                    elif tok == 9:                     # END
+                        break
+                    else:
+                        break
+                return out
+
+            bad, good, detail = [], 0, []
+            for nm, ino in dtb_files:
+                try:
+                    st = fdt_status(assemble_dtb(nm, ino))
+                except Exception as e:
+                    warn("DTB 解析", f"{nm}: {e}")
+                    continue
+                if st is None:
+                    warn("DTB 解析", f"{nm}: 不是合法 FDT")
+                    continue
+                good += 1
+                still = [n for n in DISABLED_NODES
+                         if st.get(n) not in ("fail", "disabled")]
+                if still:
+                    bad.extend(f"{nm}:{n}" for n in still)
+                    detail.append(f"{nm}: 仍启用 {len(still)}/{len(DISABLED_NODES)}"
+                                  f" ({', '.join(x.rsplit('/', 1)[-1] for x in still)})")
+                else:
+                    detail.append(f"{nm}: 11/11 已禁用")
+            check("DTB 已禁用 11 个不存在的外设/PCIe 节点",
+                  bool(good) and not bad,
+                  "；".join(detail) if good else "未找到 evb7 DTB 文件")
             # GPT partition GUID 用于 root=PARTUUID= 备用方案
             if gpt["present"] and gpt["partitions"]:
                 ent = head[2 * SECTOR:2 * SECTOR + 128]
